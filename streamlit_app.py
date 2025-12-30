@@ -130,4 +130,20 @@ st.table(pd.DataFrame(results))
 # 顯示 ASTM 溯源核對總表
 with st.expander("📑 查看詳細 ASTM E1300 數據對照與計算說明", expanded=True):
     audit_data = {
-        "參數項目": ["厚度
+        "參數項目": ["厚度選取 (Thickness)", "強度係數 (GTF)", "荷載分配 (LS)", "NFL 查表位置", "變形量計算 (Deflection)"],
+        "依據標準章節": ["Table 4 (Minimum Thickness)", "Table 1 (Glass Type Factors)", "Section 6.3 (Load Sharing)", "Annex A1 (Charts)", "Appendix X1 (Non-linear)"],
+        "本案執行詳情": [
+            f"標稱轉最小厚度計算",
+            f"採短時間荷載 (3s) 係數",
+            f"按 t_min^3 比例分配壓力",
+            f"對應各厚度專屬 Fig. 圖號",
+            f"考慮膜應力之非線性多項式"
+        ]
+    }
+    st.table(pd.DataFrame(audit_data))
+
+# 系統總判定
+if all(r["結果狀態"] == "✅ PASS" for r in results):
+    st.success(f"🎊 系統判定：此配置通過檢核。總合抗力高於設計荷載 {q_design} kPa。")
+else:
+    st.error("⚠️ 系統判定：強度不足，請增加厚度或改用強化玻璃 (FT)。")
