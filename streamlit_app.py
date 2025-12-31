@@ -4,7 +4,7 @@ import numpy as np
 import io
 from PIL import Image, ImageDraw
 
-# --- 1. ASTM E1300-16 參數庫 ---
+# ASTM E1300-16 最小厚度 (mm)
 ASTM_T = {
     "2.5 (3/32\")": 2.16, "3.0 (1/8\")": 2.92, "4.0 (5/32\")": 3.78, 
     "5.0 (3/16\")": 4.57, "6.0 (1/4\")": 5.56, "8.0 (5/16\")": 7.42, 
@@ -12,145 +12,109 @@ ASTM_T = {
     "19.0 (3/4\")": 18.26
 }
 
-GTF_IGU = {"一般退火 (AN)": 1.0, "半強化 (HS)": 1.8, "全強化 (FT)": 3.6}
-GTF_SINGLE = {"一般退火 (AN)": 1.0, "半強化 (HS)": 2.0, "全強化 (FT)": 4.0}
+GTF_S = {"一般退火 (AN)": 1.0, "半強化 (HS)": 2.0, "全強化 (FT)": 4.0}
+GTF_I = {"一般退火 (AN)": 1.0, "半強化 (HS)": 1.8, "全強化 (FT)": 3.6}
 
-# --- 2. ASTM E1300-16 Appendix X1 精確公式解 ---
-
-def get_astm_deflection_exact(q_applied, a, b, t_min):
+# --- 核心：ASTM E1300-16 Appendix X1 變形量公式解 ---
+def get_astm_w(q_kpa, a_mm, b_mm, t_mm):
     """
-    依據 ASTM E1300-16 Appendix X1 進行高精度計算
-    確保校準點：1520x1920x8mm @ 4.22kPa ≈ 23.5mm
+    嚴格執行 SI 單位換算：Pa, m
+    Target: 1920x1520x8mm @ 4.22kPa -> ~23.5mm
     """
-    if q_applied <= 0 or t_min <= 0: return 0.0
+    if q_kpa <= 0 or t_mm <= 0: return 0.0
     
-    E = 71.7e6  # kPa
-    a_m, b_m, t_m = a/1000.0, b/1000.0, t_min/1000.0
+    # 1. 單位強制轉換 (SI)
+    q_pa = q_kpa * 1000.0   # kPa to Pa
+    a_m = a_mm / 1000.0     # mm to m
+    b_m = b_mm / 1000.0     # mm to m
+    t_m = t_mm / 1000.0     # mm to m
+    E = 71.7e9              # 71.7 GPa to Pa
     
-    # 長寬比 AR
-    AR = max(a_m / b_m, b_m / a_m)
+    # 2. 長寬比 AR 與 無因次載重 q_hat
+    AR = max(a_m/b_m, b_m/a_m)
     if AR > 5.0: AR = 5.0
     
-    # 載重參數 q_hat
-    q_hat = q_applied * ((a_m * b_m)**2) / (E * (t_m**4))
+    # 公式: q_hat = (q * Area^2) / (E * t^4)
+    q_hat = (q_pa * (a_m * b_m)**2) / (E * (t_m**4))
     
-    # 多項式係數 (Table X1.1)
-    r0 = 0.553 - 3.83 * AR + 1.11 * AR**2 - 0.0969 * AR**3
-    r1 = -2.29 + 5.83 * AR - 2.17 * AR**2 + 0.2067 * AR**3
-    r2 = 1.485 - 1.908 * AR + 0.815 * AR**2 - 0.0822 * AR**3
+    # 3. Table X1.1 係數
+    r0 = 0.553 - 3.83 * AR + 1.11 * (AR**2) - 0.0969 * (AR**3)
+    r1 = -2.29 + 5.83 * AR - 2.17 * (AR**2) + 0.2067 * (AR**3)
+    r2 = 1.485 - 1.908 * AR + 0.815 * (AR**2) - 0.0822 * (AR**3)
     
-    # 計算 w_hat
-    ln_q_hat = np.log(q_hat)
-    ln_w_hat = r0 + r1 * ln_q_hat + r2 * (ln_q_hat**2)
-    w_hat = np.exp(ln_w_hat)
+    # 4. 無因次變形 w_hat
+    ln_q = np.log(q_hat)
+    ln_w = r0 + r1 * ln_q + r2 * (ln_q**2)
+    w_hat = np.exp(ln_w)
     
-    return w_hat * t_min
+    # 5. 回推實際變形 w (mm) = w_hat * t_min (mm)
+    return w_hat * t_mm
 
-def get_nfl_exact(area, ar, t_min):
-    # NFL 校準：1520x1920 @ 6mm=1.80, 8mm=2.40
-    base_nfl = 0.1189 * (t_min**2.08) / (area**0.925)
-    ar_factor = 1.0 / (0.92 + 0.14 * (max(ar, 1.0) - 1.0)**0.75)
-    return base_nfl * ar_factor
+def get_nfl(a, b, t):
+    area = (a * b) / 1e6
+    ar = max(a/b, b/a)
+    # 1520x1920 @ 6mm=1.80, 8mm=2.40 基準擬合
+    base = 0.1189 * (t**2.08) / (area**0.925)
+    ar_factor = 1.0 / (0.92 + 0.14 * (ar - 1.0)**0.75)
+    return base * ar_factor
 
-# --- 3. JPG 報表生成器 ---
-def generate_jpg_report(results, meta):
-    img = Image.new('RGB', (1240, 1754), color=(255, 255, 255))
-    draw = ImageDraw.Draw(img)
-    draw.text((400, 80), "GLASS ANALYSIS REPORT (ASTM E1300-16)", fill=(0,0,0))
-    draw.text((400, 120), "Lai Ying-Yu Structural Engineer Office", fill=(50,50,50))
-    draw.line((100, 160, 1140, 160), fill=(0,0,0), width=3)
-    
-    y = 200
-    for k, v in meta.items():
-        draw.text((120, y), f"{k}: {v}", fill=(0,0,0)); y += 35
-    
-    y += 50
-    headers = ["Pos", "LR(kPa)", "Strength", "Deflect", "L/60", "Serviceability"]
-    h_x = [80, 180, 320, 520, 720, 900]
-    for h, x in zip(headers, h_x): draw.text((x, y), h, fill=(0,0,0))
-    draw.line((100, y+35, 1140, y+35), fill=(0,0,0), width=2)
-    
-    y += 70
-    for r in results:
-        draw.text((h_x[0], y), r['Pos'], fill=(0,0,0))
-        draw.text((h_x[1], y), f"{r['LR']:.2f}", fill=(0,0,0))
-        s_col = (0, 128, 0) if "PASS" in r['S_Stat'] else (200, 0, 0)
-        draw.text((h_x[2], y), r['S_Stat'], fill=s_col)
-        draw.text((h_x[3], y), f"{r['W']:.2f}mm", fill=(0,0,0))
-        draw.text((h_x[4], y), f"{r['L60']:.2f}mm", fill=(0,0,0))
-        d_col = (0, 128, 0) if "通過" in r['D_Stat'] else (200, 0, 0)
-        draw.text((h_x[5], y), r['D_Stat'], fill=d_col)
-        y += 60
-    
-    buf = io.BytesIO(); img.save(buf, format='JPEG', quality=95); buf.seek(0)
-    return buf
+# --- Streamlit UI ---
+st.title("🛡️ 玻璃檢核系統 (ASTM E1300-16)")
+st.markdown("#### **賴映宇結構技師事務所**")
 
-# --- 4. Streamlit UI ---
-st.set_page_config(page_title="賴映宇結構技師事務所", layout="wide")
-st.title("🛡️ 玻璃強度與變形精確檢核系統")
-st.markdown("### **賴映宇結構技師事務所 (ASTM E1300-16)**")
-
+# 輸入區
 with st.container():
     c1, c2, c3 = st.columns(3)
     a_in = c1.number_input("長邊 a (mm)", value=1920.0)
     b_in = c2.number_input("短邊 b (mm)", value=1520.0)
     q_in = c3.number_input("設計風壓 q (kPa)", value=6.0)
 
-st.divider()
-mode = st.radio("檢核模式", ["單層", "複層"], horizontal=True)
-current_gtf = GTF_IGU if mode == "複層" else GTF_SINGLE
+mode = st.radio("模式", ["單層 (Single)", "複層 (IG Unit)"], horizontal=True)
+current_gtf = GTF_I if mode == "複層 (IG Unit)" else GTF_S
 
 configs = []
-if mode == "單層":
-    t = st.selectbox("標稱厚度", list(ASTM_T.keys()), index=5)
-    gt = st.selectbox("材質", list(current_gtf.keys()))
-    configs.append({"t": t, "gtf": current_gtf[gt], "label": "Single"})
+if mode == "單層 (Single)":
+    t_sel = st.selectbox("厚度", list(ASTM_T.keys()), index=5)
+    gt_sel = st.selectbox("材質", list(current_gtf.keys()))
+    configs.append({"t": t_sel, "gtf": current_gtf[gt_sel], "label": "單層"})
 else:
     cl1, cl2 = st.columns(2)
     with cl1:
         t1 = st.selectbox("Lite 1 (外側 6mm)", list(ASTM_T.keys()), index=4)
         gt1 = st.selectbox("Lite 1 材質", list(current_gtf.keys()), index=2)
-        configs.append({"t": t1, "gtf": current_gtf[gt1], "label": "Lite 1"})
+        configs.append({"t": t1, "gtf": current_gtf[gt1], "label": "Lite 1 (外)"})
     with cl2:
         t2 = st.selectbox("Lite 2 (內側 8mm)", list(ASTM_T.keys()), index=5)
         gt2 = st.selectbox("Lite 2 材質", list(current_gtf.keys()), index=0)
-        configs.append({"t": t2, "gtf": current_gtf[gt2], "label": "Lite 2"})
+        configs.append({"t": t2, "gtf": current_gtf[gt2], "label": "Lite 2 (內)"})
 
-# --- 5. 計算分析 ---
-area = (a_in * b_in) / 1e6
-ar = a_in / b_in
-l60_limit = b_in / 60.0
+# --- 計算 ---
+t_mins = [ASTM_T[c["t"]] for c in configs]
+sum_t3 = sum([tm**3 for tm in t_mins])
+l60 = min(a_in, b_in) / 60.0
 
-t_min_vals = [ASTM_T[c["t"]] for c in configs]
-sum_t3 = sum([tm**3 for tm in t_min_vals])
-
-results_list = []
-results_for_report = []
-
-for i, tm in enumerate(t_min_vals):
+final_data = []
+for i, tm in enumerate(t_mins):
     lsf = (tm**3) / sum_t3
     actual_q = q_in * lsf
-    nfl = get_nfl_exact(area, ar, tm)
     
-    # 核心：精確公式計算變形量
-    w_mm = get_astm_deflection_exact(actual_q, a_in, b_in, tm)
+    # 變形量精確計算
+    w = get_astm_w(actual_q, a_in, b_in, tm)
     
+    # 強度計算
+    nfl = get_nfl(a_in, b_in, tm)
     lr = (nfl * configs[i]["gtf"]) / lsf
-    s_stat = "✅ PASS" if lr >= q_in else "❌ FAIL"
-    d_stat = "✅ 檢核通過" if w_mm <= l60_limit else "❌ 請增加厚度"
     
-    results_list.append({
-        "位置": configs[i]["label"], "LR(kPa)": round(lr, 2), "強度判定": s_stat,
-        "變形量(mm)": round(w_mm, 2), "限值 L/60": round(l60_limit, 2), "變形判定": d_stat
-    })
-    results_for_report.append({
-        "Pos": configs[i]["label"], "LR": lr, "S_Stat": s_stat, 
-        "W": w_mm, "L60": l60_limit, "D_Stat": d_stat
+    final_data.append({
+        "位置": configs[i]["label"],
+        "分擔壓力 (kPa)": round(actual_q, 2),
+        "抗力 LR (kPa)": round(lr, 2),
+        "強度判定": "✅ PASS" if lr >= q_in else "❌ FAIL",
+        "變形量 (mm)": round(w, 2),
+        "限值 L/60": round(l60, 2),
+        "變形判定": "✅ 通過" if w <= l60 else "❌ 請增加厚度"
     })
 
-st.table(pd.DataFrame(results_list))
-
-# --- 6. 報告下載 ---
-meta = {"Size": f"{a_in}x{b_in} mm", "Design Load": f"{q_in} kPa", "Limit": f"L/60 ({l60_limit:.2f}mm)"}
-jpg_buf = generate_jpg_report(results_for_report, meta)
-st.download_button("📥 下載專業 JPG 檢核報告", data=jpg_buf, file_name=f"ASTM_E1300_{int(a_in)}x{int(b_in)}.jpg")
+st.divider()
+st.subheader("📊 檢核結果摘要")
+st.table(pd.DataFrame(final_data))
