@@ -1,7 +1,5 @@
 import streamlit as st
 import pandas as pd
-import io
-from PIL import Image, ImageDraw
 
 # 1. ASTM E1300-16 標稱與最小厚度對應 (mm)
 ASTM_T_DATA = {
@@ -11,7 +9,7 @@ ASTM_T_DATA = {
     "19.0 (3/4\")": 18.26
 }
 
-# 玻璃材質強化係數 GTF (Table 2:單層, Table 3:複層)
+# 玻璃材質強化係數 GTF (依據 ASTM E1300 Table 2 & 3)
 GTF_SINGLE = {"一般退火 (AN)": 1.0, "半強化 (HS)": 2.0, "全強化 (FT)": 4.0}
 GTF_IGU    = {"一般退火 (AN)": 1.0, "半強化 (HS)": 1.8, "全強化 (FT)": 3.6}
 
@@ -47,19 +45,19 @@ configs = []
 if mode == "單層玻璃 (Single)":
     cl_s, cl_m = st.columns(2)
     t_s = cl_s.selectbox("標稱厚度", list(ASTM_T_DATA.keys()), index=5)
-    gt_s = cl_m.selectbox("材質 (Table 2)", list(GTF_SINGLE.keys()))
+    gt_s = cl_m.selectbox("材質", list(GTF_SINGLE.keys()))
     configs.append({"t_nom": t_s, "gtf": GTF_SINGLE[gt_s], "label": "單層玻璃"})
 else:
     col_l1, col_l2 = st.columns(2)
     with col_l1:
         st.markdown("**室外側 Lite 1**")
-        t1 = st.selectbox("Lite 1 厚度", list(ASTM_T_DATA.keys()), index=4, key="t1")
-        gt1 = st.selectbox("Lite 1 材質 (Table 3)", list(GTF_IGU.keys()), index=2, key="gt1")
+        t1 = col_l1.selectbox("Lite 1 厚度", list(ASTM_T_DATA.keys()), index=4, key="t1")
+        gt1 = col_l1.selectbox("Lite 1 材質", list(GTF_IGU.keys()), index=2, key="gt1")
         configs.append({"t_nom": t1, "gtf": GTF_IGU[gt1], "label": "Lite 1 (外)"})
     with col_l2:
         st.markdown("**室內側 Lite 2**")
-        t2 = st.selectbox("Lite 2 厚度", list(ASTM_T_DATA.keys()), index=5, key="t2")
-        gt2 = st.selectbox("Lite 2 材質 (Table 3)", list(GTF_IGU.keys()), index=0, key="gt2")
+        t2 = col_l2.selectbox("Lite 2 厚度", list(ASTM_T_DATA.keys()), index=5, key="t2")
+        gt2 = col_l2.selectbox("Lite 2 材質", list(GTF_IGU.keys()), index=0, key="gt2")
         configs.append({"t_nom": t2, "gtf": GTF_IGU[gt2], "label": "Lite 2 (內)"})
 
 # --- 4. 執行計算 ---
@@ -71,20 +69,20 @@ sum_t3 = sum([tm**3 for tm in t_min_list])
 
 final_res = []
 for i, tm in enumerate(t_min_list):
-    # 計算負載分配 LSF
+    # 計算負載分配 LSF (立方厚度比)
     lsf = (tm**3) / sum_t3 if sum_t3 > 0 else 1.0
-    actual_q = q_input * lsf
     nfl = get_nfl_calibrated(a_input, b_input, tm)
     
     # 強度計算：LR = (NFL * GTF) / LSF
+    # 此處 LR 是針對整片 IGU 的總抗力基準
     lr = (nfl * configs[i]["gtf"]) / lsf
     
     final_res.append({
         "檢核位置": configs[i]["label"],
         "分擔比例 (LSF)": round(lsf, 3),
-        "分擔壓力 (kPa)": round(actual_q, 2),
+        "單片 NFL (kPa)": round(nfl, 2),
         "抗力 LR (kPa)": round(lr, 2),
-        "設計壓力 q (kPa)": q_input,
+        "設計風壓 (kPa)": q_input,
         "強度判定": "✅ PASS" if lr >= q_input else "❌ FAIL"
     })
 
