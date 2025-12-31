@@ -1,89 +1,112 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 
-# 1. ASTM E1300-16 標稱與最小厚度對應 (mm)
-ASTM_T_DATA = {
-    "2.5 (3/32\")": 2.16, "3.0 (1/8\")": 2.92, "4.0 (5/32\")": 3.78, 
-    "5.0 (3/16\")": 4.57, "6.0 (1/4\")": 5.56, "8.0 (5/16\")": 7.42, 
-    "10.0 (3/8\")": 9.02, "12.0 (1/2\")": 11.91, "16.0 (5/8\")": 15.09, 
-    "19.0 (3/4\")": 18.26
+# --- 1. 最小實厚定義 (ASTM E1300 Table 1) ---
+ASTM_T = {"6.0": 5.56, "8.0": 7.42, "10.0": 9.02, "12.0": 11.91, "15.0": 15.09, "19.0": 18.26}
+GTF = {"一般退火 (AN)": 1.0, "熱硬化": 1.8, "強化": 3.6}
+
+# --- 2. 聖經數據：2-s NFL (Figure 4 數位化) ---
+# 鎖定：10mm@1500=0.75, 19mm@2250=1.50
+DATA_NFL_2S = {
+    "10.0": {"span": [1000, 1250, 1500, 1750, 2000, 2500, 3000], "nfl": [1.68, 1.05, 0.75, 0.55, 0.42, 0.27, 0.18]},
+    "19.0": {"span": [1000, 1500, 2000, 2250, 2500, 2750, 3000], "nfl": [7.55, 3.38, 1.90, 1.50, 1.22, 1.00, 0.85]},
+    "8.0":  {"span": [1000, 1500, 2000, 2500, 3000], "nfl": [1.13, 0.51, 0.28, 0.18, 0.12]},
+    "12.0": {"span": [1000, 1500, 2000, 2500, 3000], "nfl": [2.95, 1.32, 0.74, 0.47, 0.33]}
 }
 
-# 玻璃材質強化係數 GTF (依據 ASTM E1300 Table 2 & 3)
-GTF_SINGLE = {"一般退火 (AN)": 1.0, "半強化 (HS)": 2.0, "全強化 (FT)": 4.0}
-GTF_IGU    = {"一般退火 (AN)": 1.0, "半強化 (HS)": 1.8, "全強化 (FT)": 3.6}
+# --- 3. 聖經數據：2-s 變形量 (Figure X1.1 數位化) ---
+DATA_DEF_2S = {
+    "10.0": {"q": [0.5, 1.0, 2.0, 3.0, 4.2, 5.0], "w_ref": [12.8, 26.5, 52.0, 78.5, 110.2, 132.5]},
+    "8.0":  {"q": [0.5, 1.0, 2.0, 3.0, 4.2, 5.0], "w_ref": [21.5, 44.2, 88.5, 132.0, 185.0, 220.0]},
+    "19.0": {"q": [0.5, 1.0, 2.0, 3.0, 4.2, 5.0], "w_ref": [1.5, 3.2, 6.5, 9.8, 13.5, 16.2]}
+}
 
-# --- 2. 核心計算引擎 ---
+def bible_lookup_2s(t_nom, span_mm, q_share):
+    # NFL 查表
+    db_n = DATA_NFL_2S.get(t_nom)
+    nfl = np.exp(np.interp(np.log(span_mm), np.log(db_n["span"]), np.log(db_n["nfl"])))
+    # 變形查表 (以 2000mm 為基準並修正)
+    db_w = DATA_DEF_2S.get(t_nom)
+    w_base = np.interp(q_share, db_w["q"], db_w["w_ref"])
+    w_final = w_base * (span_mm / 2000)**3.8 
+    return nfl, w_final
 
-def get_nfl_calibrated(a_mm, b_mm, t_mm):
-    """ 依據 ASTM E1300 擬合之 NFL (kPa) """
-    area_m2 = (a_mm * b_mm) / 1e6
-    ar = max(a_mm/b_mm, b_mm/a_mm)
-    # 基準校準點：1920x1520 @ 6mm=1.80, 8mm=2.40
-    base = 0.1189 * (t_mm**2.08) / (area_m2**0.925)
-    ar_factor = 1.0 / (0.92 + 0.14 * (ar - 1.0)**0.75)
-    return base * ar_factor
-
-# --- 3. Streamlit UI 介面 ---
+# --- 4. UI 介面 ---
 st.set_page_config(page_title="賴映宇結構技師事務所", layout="wide")
-st.title("🛡️ 建築玻璃強度檢核系統")
-st.markdown("#### **賴映宇結構技師事務所 (ASTM E1300-16)**")
+st.title("玻璃強度檢核系統 (ASTM E1300-16)")
+st.subheader("賴映宇結構技師事務所")
 st.divider()
 
-# Step 1: 輸入尺寸與設計風壓
-st.header("1. 尺寸與設計荷載")
-col1, col2, col3 = st.columns(3)
-a_input = col1.number_input("長邊 a (mm)", value=1920.0)
-b_input = col2.number_input("短邊 b (mm)", value=1520.0)
-q_input = col3.number_input("設計風壓 q (kPa)", value=6.0)
+# A. 設計參數
+st.header("1. 設計參數設定")
+c1, c2, c3 = st.columns(3)
+a_in = c1.number_input("長邊 a (mm)", value=5360.0)
+b_in = c2.number_input("短邊 b (mm)", value=2000.0)
+q_design = c3.number_input("設計風壓 q_design (kPa)", value=4.2)
 
-# Step 2: 選擇配置
-st.header("2. 玻璃配置與材質設定")
-mode = st.radio("模式選擇", ["單層玻璃 (Single)", "複層玻璃 (IG Unit)"], horizontal=True)
+# B. 配置設定
+st.header("2. 玻璃配置與邊界條件")
+c_type, c_cond = st.columns(2)
+mode = c_type.radio("類型", ["複層玻璃 (IGU)", "單層玻璃"], horizontal=True)
+b_cond = c_cond.selectbox("邊界條件", ["兩邊固定 (2-s)", "四邊固定 (4-s)"])
 
-configs = []
-if mode == "單層玻璃 (Single)":
-    cl_s, cl_m = st.columns(2)
-    t_s = cl_s.selectbox("標稱厚度", list(ASTM_T_DATA.keys()), index=5)
-    gt_s = cl_m.selectbox("材質", list(GTF_SINGLE.keys()))
-    configs.append({"t_nom": t_s, "gtf": GTF_SINGLE[gt_s], "label": "單層玻璃"})
+lites = []
+if mode == "複層玻璃 (IGU)":
+    cl, cr = st.columns(2)
+    t1 = cl.selectbox("外側 Lite 1 (t1)", list(ASTM_T.keys()), index=2) # 10mm
+    gt1 = cl.selectbox("材質 1", list(GTF.keys()), index=2) # 強化
+    t2 = cr.selectbox("內側 Lite 2 (t2)", list(ASTM_T.keys()), index=1) # 8mm
+    gt2 = cr.selectbox("材質 2", list(GTF.keys()), index=2) # 強化
+    
+    t1m, t2m = ASTM_T[t1], ASTM_T[t2]
+    lsf1 = (t1m**3)/(t1m**3 + t2m**3) # 負載分配係數
+    lites.append({"label": "Lite 1 (外)", "t_nom": t1, "lsf": lsf1, "gt": GTF[gt1]})
+    lites.append({"label": "Lite 2 (內)", "t_nom": t2, "lsf": 1-lsf1, "gt": GTF[gt2]})
 else:
-    col_l1, col_l2 = st.columns(2)
-    with col_l1:
-        st.markdown("**室外側 Lite 1**")
-        t1 = col_l1.selectbox("Lite 1 厚度", list(ASTM_T_DATA.keys()), index=4, key="t1")
-        gt1 = col_l1.selectbox("Lite 1 材質", list(GTF_IGU.keys()), index=2, key="gt1")
-        configs.append({"t_nom": t1, "gtf": GTF_IGU[gt1], "label": "Lite 1 (外)"})
-    with col_l2:
-        st.markdown("**室內側 Lite 2**")
-        t2 = col_l2.selectbox("Lite 2 厚度", list(ASTM_T_DATA.keys()), index=5, key="t2")
-        gt2 = col_l2.selectbox("Lite 2 材質", list(GTF_IGU.keys()), index=0, key="gt2")
-        configs.append({"t_nom": t2, "gtf": GTF_IGU[gt2], "label": "Lite 2 (內)"})
+    ts = st.selectbox("單層厚度", list(ASTM_T.keys()), index=2)
+    gs = st.selectbox("材質", list(GTF.keys()), index=2)
+    lites.append({"label": "單層玻璃", "t_nom": ts, "lsf": 1.0, "gt": GTF[gs]})
 
-# --- 4. 執行計算 ---
+# --- 5. 計算報表 ---
 st.divider()
-st.header("3. 強度檢核結果")
+st.subheader("📋 檢核結果報表 (依據技師指定公式)")
 
-t_min_list = [ASTM_T_DATA[c["t_nom"]] for c in configs]
-sum_t3 = sum([tm**3 for tm in t_min_list])
+span = b_in if b_cond == "兩邊固定 (2-s)" else min(a_in, b_in)
+l60_limit = span / 60.0
+results_table = []
+all_w = []
 
-final_res = []
-for i, tm in enumerate(t_min_list):
-    # 計算負載分配 LSF (立方厚度比)
-    lsf = (tm**3) / sum_t3 if sum_t3 > 0 else 1.0
-    nfl = get_nfl_calibrated(a_input, b_input, tm)
+for L in lites:
+    qs = q_design * L["lsf"] # 單片分擔的壓力
+    nfl, w = bible_lookup_2s(L["t_nom"], span, qs)
     
-    # 強度計算：LR = (NFL * GTF) / LSF
-    # 此處 LR 是針對整片 IGU 的總抗力基準
-    lr = (nfl * configs[i]["gtf"]) / lsf
+    # 技師指定公式：LR = NFL * GTF / LSF
+    lr_system = (nfl * L["gt"]) / L["lsf"]
     
-    final_res.append({
-        "檢核位置": configs[i]["label"],
-        "分擔比例 (LSF)": round(lsf, 3),
-        "單片 NFL (kPa)": round(nfl, 2),
-        "抗力 LR (kPa)": round(lr, 2),
-        "設計風壓 (kPa)": q_input,
-        "強度判定": "✅ PASS" if lr >= q_input else "❌ FAIL"
+    results_table.append({
+        "檢核位置": L["label"],
+        "負載分配 (LSF)": f"{L['lsf']:.4f}",
+        "分擔壓力 (qs)": f"{qs:.3f} kPa",
+        "NFL (查表)": f"{nfl:.3f} kPa",
+        "總抗力 (NFL*GTF/LSF)": f"{lr_system:.2f} kPa",
+        "強度判定": "✅ PASS" if lr_system >= q_design else "❌ FAIL",
+        "變形量 (mm)": f"{w:.2f}"
     })
+    all_w.append(w)
 
-st.table(pd.DataFrame(final_res))
+st.table(pd.DataFrame(results_table))
+
+# 變形控制
+max_w = max(all_w)
+st.subheader("📋 變形量控制複核")
+col_w1, col_w2 = st.columns(2)
+col_w1.metric("計算最大變形量", f"{max_w:.2f} mm")
+col_w2.metric("規範限值 (L/60)", f"{l60_limit:.2f} mm")
+
+if max_w > l60_limit:
+    st.error(f"❌ 變形檢核不合格 (超出 {max_w - l60_limit:.2f} mm)")
+else:
+    st.success("✅ 變形檢核合格")
+
+st.info(f"技術筆記：總抗力已根據 LSF 進行還原，反映整組 IGU 的結構能力。目前跨距 L = {span} mm。")
