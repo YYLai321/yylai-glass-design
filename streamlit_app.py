@@ -8,8 +8,9 @@ import streamlit as st
 #   - 強度:ASTM Annex A1 四邊簡支 NFL 圖表(Fig. A1.x 上圖)之數位化資料,
 #           6/8/10/12/16/19 mm,單層與厚度不同之複層皆可逐片查表。
 #   - 變形:Appendix X1 多項式公式(四邊簡支)。
-#   - GTF:Table 1/2/3;LSF:Table 5(t^3 比例),皆為單片玻璃(未納入膠合玻璃)。
-#   - 結構矽膠:短邊尺寸 x 設計風壓 -> 20 psi / 30 psi 所需受力寬度。
+#   - 強度兩法並列:查表法(NFL x GTF / LSF)與公式法(線性板理論 + 容許表面應力)。
+#   - LSF 以 t^3 比例;皆為單片玻璃(未納入膠合玻璃)。
+#   - 結構矽膠:短邊尺寸 x 設計風壓 -> 20 psi / 30 psi 所需受力寬度(複層另算中間層二次密封膠)。
 # NFL 圖表數位化由影像處理取得,於標準內附範例(6mm 1200x1500 -> 2.5 kPa 等)
 # 核對誤差約 1~2%;圖表左上端(接近正方形)與右側外推部分已於畫面標示。
 # =====================================================================
@@ -22,6 +23,12 @@ CHART_LIMITS = {6: (5080, 3810), 8: (6350, 3810), 10: (6350, 3810),
                 12: (6350, 3810), 16: (6350, 3810), 19: (6350, 3810)}
 ASTM_T = {6: 5.56, 8: 7.42, 10: 9.02, 12: 11.91, 16: 15.09, 19: 18.26}   # Table 4
 THICK = [6, 8, 10, 12, 16, 19]
+# 公式法:Timoshenko 四邊簡支均布載重板中心應力係數 (nu=0.3),sigma = 6*beta*q*a^2/t^2 (a=短邊)
+BETA_AR = [1.0 + 0.25 * i for i in range(17)]
+BETA_V = [0.0479, 0.0661, 0.0812, 0.0929, 0.1017, 0.1082, 0.1129, 0.1164, 0.1189,
+          0.1206, 0.1219, 0.1228, 0.1235, 0.1239, 0.1242, 0.1245, 0.1246]
+SIG_ALLOW = {"AN": 23.3, "HS": 46.6, "FT": 93.1}      # MPa, Appendix X6.2 (Pb=0.008, 3 s)
+LONG_RATIO = {"AN": 0.43, "HS": 0.65, "FT": 0.75}      # 長/短期比值(取自 Table 1 GTF 比值,工程外推)
 MAT = {"FT 強化玻璃": "FT", "HS 熱硬化玻璃": "HS", "AN 普通(退火)玻璃": "AN"}
 
 GTF_SINGLE = {"FT": {"short": 4.0, "long": 3.0},
@@ -122,7 +129,7 @@ with st.sidebar:
     short_in = st.number_input("玻璃短邊 (mm)", value=1600.0, step=50.0, min_value=100.0)
     long_in = st.number_input("玻璃長邊 (mm)", value=6000.0, step=50.0, min_value=100.0)
     q_kgf = st.number_input("設計風壓 (kgf/m²)", value=300.0, step=10.0, min_value=1.0)
-    dur = st.radio("載重期間(影響 GTF)", ["短期 (3 秒,風壓)", "長期 (30 天,雪載)"])
+    dur = st.radio("載重期間(影響 GTF / 容許應力)", ["短期 (3 秒,風壓)", "長期 (30 天,雪載)"])
     dur_key = "short" if dur.startswith("短期") else "long"
     unit = st.radio("組合方式", ["單層", "複層 (IG)"])
     st.subheader("室外側 (Lite 1)")
@@ -133,9 +140,11 @@ with st.sidebar:
         st.subheader("室內側 (Lite 2)")
         t2 = st.selectbox("厚度 (mm)", THICK, index=1, key="t2")
         m2 = MAT[st.selectbox("材質", list(MAT), index=1, key="m2")]
+    st.subheader("變形限值(自訂)")
+    lim_n = st.number_input("容許變形 = 短邊 / n(0 = 不判定)", value=0.0, step=10.0, min_value=0.0)
     st.subheader("結構矽膠")
     show_si = st.checkbox("計算矽膠受力寬度", value=True)
-    si_ratio_note = st.caption("受力寬度 = 風壓 × 短邊 ÷ 2 ÷ 容許應力")
+    full_seal = st.checkbox("複層中間層膠:取全風壓(保守)", value=False)
 
 L = max(long_in, short_in); S = min(long_in, short_in)
 AR = L / S
@@ -145,7 +154,7 @@ lites = [("Lite 1(室外)", t1, m1)]
 if t2:
     lites.append(("Lite 2(室內)", t2, m2))
 
-# LSF (Table 5, t^3 比例)
+# LSF (t^3 比例)
 if len(lites) == 2:
     a, b = ASTM_T[t1] ** 3, ASTM_T[t2] ** 3
     lsf = [a / (a + b), b / (a + b)]
@@ -154,63 +163,92 @@ else:
     lsf = [1.0]
     gtf = [GTF_SINGLE[m1][dur_key]]
 
-rows, notes_all, defl_all = [], [], []
+beta = float(np.interp(min(AR, 5.0), BETA_AR, BETA_V)) if AR <= 5 else 0.125
+
+rowsA, rowsB, rowsD, notes_all, defl_all = [], [], [], [], []
+lrA, lrB = [], []
 for i, (name, t, m) in enumerate(lites):
+    tm = ASTM_T[t]
+    # --- 查表法 ---
     nfl, nts = lookup_nfl(t, L, S)
     lr = nfl * gtf[i] / lsf[i]
-    q_share = q_kpa * lsf[i]
-    w = deflection_x1(L, S, q_share, ASTM_T[t])
-    defl_all.append(w)
+    lrA.append(lr * KPA_TO_KGF)
     for n in nts:
         notes_all.append(f"{name}:{n}")
-    rows.append({
+    rowsA.append({
         "位置": name, "規格": f"{t}mm {m}",
         "NFL (kgf/m²)": f"{nfl*KPA_TO_KGF:,.0f}",
         "GTF": f"{gtf[i]:.2f}", "LSF": f"{lsf[i]:.3f}",
         "容許抗力 LR (kgf/m²)": f"{lr*KPA_TO_KGF:,.0f}",
-        "分擔風壓 (kgf/m²)": f"{q_kgf*lsf[i]:,.0f}",
-        "D/C": f"{q_kpa/lr:.2f}",
-        "強度": "OK" if lr >= q_kpa else "NG",
-        "中心變形 (mm)": f"{w:.1f}",
-    })
+        "D/C": f"{q_kpa/lr:.2f}", "強度": "OK" if lr >= q_kpa else "NG"})
+    # --- 公式法 ---
+    sig = SIG_ALLOW[m] * (LONG_RATIO[m] if dur_key == "long" else 1.0)     # MPa
+    q_allow_kpa = sig * 1000 * tm**2 / (6 * beta * S**2) / lsf[i]            # kPa (MPa*1000=kPa; t,a 同單位 mm)
+    lrB.append(q_allow_kpa * KPA_TO_KGF)
+    sig_act = 6 * beta * (q_kpa * lsf[i] / 1000) * S**2 / tm**2             # MPa
+    rowsB.append({
+        "位置": name, "規格": f"{t}mm {m}", "實厚 t (mm)": f"{tm:.2f}",
+        "β": f"{beta:.4f}", "LSF": f"{lsf[i]:.3f}",
+        "作用應力 (MPa)": f"{sig_act:.1f}", "容許應力 (MPa)": f"{sig:.1f}",
+        "容許風壓 (kgf/m²)": f"{q_allow_kpa*KPA_TO_KGF:,.0f}",
+        "D/C": f"{q_kpa/q_allow_kpa:.2f}", "強度": "OK" if q_allow_kpa >= q_kpa else "NG"})
+    # --- 變形 ---
+    w = deflection_x1(L, S, q_kpa * lsf[i], tm)
+    defl_all.append(w)
+    rowsD.append({"位置": name, "規格": f"{t}mm {m}", "分擔風壓 (kgf/m²)": f"{q_kgf*lsf[i]:,.0f}",
+                  "中心變形 (mm)": f"{w:.1f}"})
 
 st.info(f"玻璃 {L:.0f} × {S:.0f} mm,AR = {AR:.2f},面積 = {L*S/1e6:.2f} m²,"
         f"設計風壓 {q_kgf:,.0f} kgf/m² ({q_kpa:.2f} kPa),{dur}")
-st.subheader("強度檢核(ASTM 查表法:LR = NFL × GTF ÷ LSF)")
-st.table(pd.DataFrame(rows))
-lr_unit = min(float(r["容許抗力 LR (kgf/m²)"].replace(",", "")) for r in rows)
-st.write(f"**整體容許抗力 = {lr_unit:,.0f} kgf/m²**(取各片最小值),"
-         f"設計風壓 {q_kgf:,.0f} kgf/m² → D/C = {q_kgf/lr_unit:.2f}")
+
+st.subheader("強度檢核 A:查表法(LR = NFL × GTF ÷ LSF)")
+st.table(pd.DataFrame(rowsA))
 for n in notes_all:
     st.warning(n)
+st.subheader("強度檢核 B:公式法(σ = 6·β·q·a²/t² ≤ 容許表面應力)")
+st.table(pd.DataFrame(rowsB))
+st.caption("β:Timoshenko 四邊簡支板中心應力係數(ν=0.3);a=短邊;容許表面應力 AN/HS/FT = 23.3/46.6/93.1 MPa(Appendix X6.2,"
+           "Pb=0.008、3 秒)。長期取短期值乘 Table 1 的長/短期 GTF 比值,屬工程外推。"
+           "複層各片以 LSF 分配風壓,未使用 Table 2/3 的 IG 組合 GTF。")
+cA, cB = min(lrA), min(lrB)
+c1, c2 = st.columns(2)
+c1.metric("查表法 整體容許抗力", f"{cA:,.0f} kgf/m²", f"D/C = {q_kgf/cA:.2f}", delta_color="off")
+c2.metric("公式法 整體容許抗力", f"{cB:,.0f} kgf/m²", f"D/C = {q_kgf/cB:.2f}", delta_color="off")
+st.caption("整體容許抗力取各片最小值。兩法理論基礎不同(查表法為非線性大變形 + 破壞機率模型,公式法為線性板理論),"
+           "公式法通常較保守,差異可作為合理性檢查。")
 
-st.subheader("變形檢核")
+st.subheader("變形檢核(Appendix X1,依 LSF 分擔風壓逐片計算)")
+st.table(pd.DataFrame(rowsD))
 w_max = max(defl_all)
-t_eq = (sum(ASTM_T[t] ** 3 for _, t, _ in lites)) ** (1 / 3)
-w_eq = deflection_x1(L, S, q_kpa, t_eq)
-c1, c2, c3 = st.columns(3)
-c1.metric("各片分擔法最大變形", f"{w_max:.1f} mm")
-c2.metric("等值厚度法 (t_eq=%.2f mm)" % t_eq, f"{w_eq:.1f} mm")
-c3.metric("L/36 | L/60 (短邊)", f"{S/36:.1f} | {S/60:.1f} mm")
-st.caption("ASTM E1300 未規定變形容許值(§5.2 Note 1);L/36、L/60 為業界慣例,請依專案規範判斷。"
-           "各片分擔法:依 LSF 分配風壓後逐片用 Appendix X1;等值厚度法與一般 Excel 作法相同,僅供對照。")
-for lab, lim in (("L/36", S / 36), ("L/60", S / 60)):
-    st.write(f"- {lab} = {lim:.1f} mm:" + ("OK" if w_eq <= lim else "NG") + "(等值厚度法)")
+st.write(f"- 最大中心變形 = **{w_max:.1f} mm**(短邊 {S:.0f} mm,約 L/{S/w_max:.0f})" if w_max > 0 else "- 變形極小")
+if lim_n > 0:
+    lim = S / lim_n
+    st.write(f"- 自訂限值 L/{lim_n:.0f} = {lim:.1f} mm:" + ("OK" if w_max <= lim else "NG"))
+st.caption("ASTM E1300 本身不規定變形容許值(§5.2 Note 1),本程式不預設限值;請依專案規範或廠商要求在左側自行填入。")
 
 if show_si:
     st.subheader("結構矽膠受力寬度")
-    st.caption("以短邊所承受風壓傳至一側之線載重估算:W = q × 短邊 ÷ 2 ÷ f。複層玻璃風壓由整組單元傳遞,故取全風壓。"
-               "僅為風壓所需寬度;另請依自重、膠厚、溫度位移及膠品廠商規定檢核。")
-    f_rows = []
-    for psi in (20, 30):
-        f = psi * PSI_TO_KGFCM2           # kgf/cm²
-        line = q_kgf * (S / 1000) / 2     # kgf/m
-        w_mm = line / 100 / f * 10        # mm
-        f_rows.append({"設計強度": f"{psi} psi = {f:.2f} kgf/cm²",
-                       "線載重 (kgf/m)": f"{line:,.1f}",
-                       "所需寬度 (mm)": f"{w_mm:.1f}",
-                       "建議採用 (mm,進位至 1mm,且 ≥6.4)": f"{max(np.ceil(w_mm), 6.4):.0f}"})
-    st.table(pd.DataFrame(f_rows))
+    st.caption("公式:寬度 = 風壓 × 短邊 ÷ 2 ÷ 容許應力(線載重由短邊傳至長邊)。僅為風壓所需寬度;"
+               "另請依自重、膠厚、位移及膠品廠商規定檢核。")
+    def si_rows(q_use, label):
+        out = []
+        for psi in (20, 30):
+            f = psi * PSI_TO_KGFCM2
+            line = q_use * (S / 1000) / 2
+            w_mm = line / 100 / f * 10
+            out.append({"部位": label, "設計強度": f"{psi} psi = {f:.2f} kgf/cm²",
+                        "採用風壓 (kgf/m²)": f"{q_use:,.0f}", "線載重 (kgf/m)": f"{line:,.1f}",
+                        "所需寬度 (mm)": f"{w_mm:.1f}",
+                        "建議採用 (mm)": f"{np.ceil(w_mm):.0f}"})
+        return out
+    rows = si_rows(q_kgf, "結構矽膠(玻璃—框)" if len(lites) == 2 else "結構矽膠")
+    if len(lites) == 2:
+        q_mid = q_kgf if full_seal else q_kgf * lsf[0]
+        rows += si_rows(q_mid, "中間層二次密封膠(外片—內片)")
+    st.table(pd.DataFrame(rows))
+    if len(lites) == 2:
+        st.caption("中間層二次密封膠:預設採外片分擔風壓(q × LSF1,其餘由氣層傳至內片);"
+                   "勾選左側「取全風壓」可改為保守算法。玻璃—框之結構膠取全風壓。建議寬度未計入各廠規定之最小值,請另行確認。")
 
 st.divider()
 st.caption("NFL 數據來源:ASTM E1300-16 Annex A1 四邊簡支圖表影像數位化(誤差約 1~2%,"
