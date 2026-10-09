@@ -744,12 +744,9 @@ for i, lt in enumerate(lites):
         _csrc = ("ASTM E1300 A1.36~A1.42 LG" if lt["kind"] == "lg" else "ASTM E1300 A1.20~A1.25") + " 三邊標準變形圖(AR 線,數位化)之近似值"
     elif mi in (2, 3):
         _ek = ("E2" if mi == 2 else "E1") + ("L" if lt["kind"] == "lg" else "")
-        _cw = chart_defl_edge(_ek, lt["D"], qi * (dimA / 1000.0) ** 4)
-        if lt["kind"] == "lg":
-            chart_w = _cw
-            _csrc = "ASTM E1300 " + ("A1.43" if mi == 2 else "A1.44") + " LG 標準變形圖(直線數位化)之近似值(圖為 50°C)"
-        else:
-            edge_chart_mono = _cw                      # 單片:梁 / 懸臂公式即為標準圖直線,圖讀值僅供對照
+        chart_w = chart_defl_edge(_ek, lt["D"], qi * (dimA / 1000.0) ** 4)
+        _csrc = ("ASTM E1300 " + (("A1.43" if mi == 2 else "A1.44") if lt["kind"] == "lg" else ("A1.27" if mi == 2 else "A1.28"))
+                 + " 標準變形圖(直線數位化)之讀值" + ("(圖為 50°C)" if lt["kind"] == "lg" else ""))
     chart_used.append(chart_w is not None)
     if chart_w is not None:
         ws = [(chart_w, _csrc, ws[0][2], ws[0][3])]
@@ -759,9 +756,11 @@ for i, lt in enumerate(lites):
     if chart_w is not None and mi == 0:
         lgn = "(LG:標準圖查得近似值;圖上 AR1~AR3 曲線重疊/交叉處數位化不確定度約 1~3 mm;圖為 50°C 結果,PVB 溫度/載重時間之影響依標準圖。另兩種剛度假設估算 = " + (fmt_w(w_est_lo) if abs(w_est_lo - w_est_hi) < 1e-9 else f"{fmt_w(w_est_lo)} ~ {fmt_w(w_est_hi)}") + ",僅供對照)"
     elif chart_w is not None and mi in (2, 3):
-        lgn = "(標準圖直線讀值,數位化誤差約 2% 內;梁/懸臂公式(代號最小厚度)參考值 " + fmt_w(w_est_lo) + ";圖為 50°C 結果)"
+        lgn = "(標準圖直線讀值,數位化誤差約 2% 內)"
     elif chart_w is not None:
-        lgn = "(標準圖直線/曲線讀值,數位化誤差約 0.3 mm 內;線性理論參考值 " + fmt_w(w_est_lo) + ")"
+        lgn = "(標準圖直線/曲線讀值,數位化誤差約 0.3 mm 內)"
+    elif mi != 0 and not lg_rng:
+        lgn = "(超出標準圖框或圖下限,無圖讀值:改以線性理論估算,線性理論於大變形時偏大,僅供參考)"
     elif lg_rng:
         lgn = "(LG 估算:兩種剛度假設(整體:代號最小厚度;分層:各片不傳剪力)之結果,供對照,不代表標準 LG 圖之上下界;非規範 LG 變形圖)"
     defl_all.append(w_hi_); defl_lo.append(w)
@@ -771,9 +770,24 @@ for i, lt in enumerate(lites):
         rd["公式解:線性板理論"] = fmt_w(w_lin_)
         rd["X1 近似公式(Appendix X1)"] = "—(X1 不適用)" if w_x1_ is None else fmt_w(w_x1_)
     else:
-        rd["公式解:線性理論"] = fmt_w(w_est_lo)
-        rd["規範變形圖"] = ((fmt_w(w) + "(標準圖近似值)") if chart_w is not None else
-                        (fmt_w(edge_chart_mono) + "(標準圖近似值,與公式一致)") if edge_chart_mono is not None else "—(本片無圖可查或超出圖框)")
+        rd["規範變形圖"] = (fmt_w(w) + "(標準圖讀值)") if chart_w is not None else "—(超出圖框,無圖讀值)"
+    # ---- 公式解與標準圖交叉驗證(單片:圖須與公式一致;LG:圖為 50°C,應落在兩種剛度假設範圍內)----
+    _cw = chart_w if chart_w is not None else edge_chart_mono
+    if mi == 0 and lt["kind"] == "lg":
+        if _cw is None:
+            rd["公式與標準圖驗證"] = "— 圖上無讀值,以公式解為準(超出圖框 / 圖下限)"
+        elif lt["kind"] == "mono":
+            _d = abs(_cw - w_est_lo); _p = _d / max(w_est_lo, 1e-9) * 100
+            _ok = _d <= 1.0 or _p <= 10.0
+            rd["公式與標準圖驗證"] = f"圖 {_cw:.1f} / 公式 {w_est_lo:.1f} mm(差 {_p:.0f}%)" + ("  ✓ 一致" if _ok else "  ⚠ 差異過大,請覆核")
+            if not _ok:
+                notes_all.append(f"{name}:標準圖讀值 {_cw:.1f} mm 與公式解 {w_est_lo:.1f} mm 差 {_p:.0f}%(> 10%),請覆核圖表數位化或公式假設")
+        else:
+            _lo_, _hi_ = min(w_est_lo, w_est_hi), max(w_est_lo, w_est_hi)
+            _ok = (_lo_ * 0.9 - 1.0) <= _cw <= (_hi_ * 1.1 + 1.0)
+            rd["公式與標準圖驗證"] = f"圖 {_cw:.1f} mm;公式兩種剛度假設 {_lo_:.1f} ~ {_hi_:.1f} mm" + ("  ✓ 落在範圍內" if _ok else "  ⚠ 超出範圍,請覆核")
+            if not _ok:
+                notes_all.append(f"{name}:LG 標準圖讀值 {_cw:.1f} mm 不在公式兩種剛度假設範圍 {_lo_:.1f}~{_hi_:.1f} mm 內,請覆核")
     if lg_rng:
         rd["判定採用值"] = (fmt_w(w_hi_) if w_hi_ < _thr else f"{fmt_w(w)} ~ {fmt_w(w_hi_)}") + "(LG 估算)"
     else:
@@ -1316,7 +1330,7 @@ def build_report():
             out.append(f"<div class='box'>LR = NFL × GTF ÷ LSF = {nfl_kpa:.2f} × {gt['gv']:.2f} ÷ {gt['lv']:.3f} = {gt['lr']:.2f} kPa"
                        f" = {gt['lr']*KPA_TO_KGF:,.0f} kgf/m²(工況:{esc(gt['cn'])});設計風壓 {q_kpa:.2f} kPa,D/C = {q_kpa/gt['lr']:.2f}</div></div>")
     out.append("<h2>4. 變形檢核</h2>")
-    _dfD = pd.DataFrame(rowsD).drop(columns=["公式解:線性板理論", "X1 近似公式(Appendix X1)", "公式解:線性理論", "規範變形圖"], errors="ignore")
+    _dfD = pd.DataFrame(rowsD)            # 變形公式(E1300 Appendix X1 / 線性理論)與標準圖並列,供交叉驗證
     out.append(_dfD.to_html(index=False, border=0, escape=True))
     out.append("<ul>" + "".join(f"<li>{esc(t)}</li>" for t in defl_txt) + "</ul>")
     if mi == 0:
@@ -1346,11 +1360,12 @@ def build_report():
         if mi == 1 and all(chart_used):
             out.append("<div class='note'>三邊標準變形圖上之紅點為由 AR 線(P/F 內插)讀得之近似值(圖上直線數位化,誤差約 0.3 mm 內);"
                        "圖上 AR>1.5 之線適用於 P/F ≥ 1.5。</div>")
-        elif mi in (2, 3) and all(u for u, lt in zip(chart_used, lites) if lt["kind"] == "lg") and any(lt["kind"] == "lg" for lt in lites):
-            out.append("<div class='note'>標準變形圖上之紅點:LG 為由標準圖直線(依代號厚度)讀得之近似值(圖為 50°C 結果,數位化誤差約 2% 內);單片為梁 / 懸臂公式之變形,應落在對應厚度直線上。</div>")
+        elif mi in (2, 3) and all(chart_used):
+            out.append("<div class='note'>標準變形圖上之紅點為由標準圖直線(依玻璃厚度 / LG 代號厚度)讀得之值(數位化誤差約 2% 內"
+                       + ("" if not any(lt["kind"] == "lg" for lt in lites) else ";LG 圖為 50°C 結果") + ")。</div>")
         else:
-            out.append("<div class='note'>標準變形圖上之紅點為本工具以線性理論 / 梁公式算得之變形(不是由圖上讀出),應落在對應曲線附近"
-                       + ("(三邊圖以 AR 區分曲線;超出圖框者以線性理論估算)" if mi == 1 else "(曲線依玻璃厚度區分,膠合玻璃以代號厚度對照)") + "。</div>")
+            out.append("<div class='note'>1~3 邊支承以標準圖查讀為主。本片超出標準圖框或圖下限,圖上無法標示讀值點,改以線性理論估算"
+                       "(線性理論於大變形時偏大,僅供參考,未作正式判定)。</div>")
     if si_rows:
         out.append("<h2>5. 結構矽膠受力寬度</h2>")
         out.append(pd.DataFrame(si_rows).to_html(index=False, border=0, escape=True))
