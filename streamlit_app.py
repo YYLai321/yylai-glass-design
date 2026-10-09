@@ -1361,11 +1361,35 @@ def build_report():
     return "".join(out)
 
 
+def _n(v):
+    return f"{v:g}"
+
+
+def report_filename():
+    """報表檔名:[專案名稱 ]寬x高x厚度。複層空氣層一律假定 12 mm。例:2000x2000x(8+12air+8)HS、3000x2000x(8+12air+6+6)FT"""
+    import re
+    def lite_txt(lt):
+        return "+".join(_n(p) for p in lt["plies"])                    # 單片 8;LG 6+6(不含 PVB)
+    def lite_mat(lt):
+        return lt["types"][0] if len(set(lt["types"])) == 1 else "/".join(lt["types"])
+    mats = [lite_mat(lt) for lt in lites]
+    if len(set(mats)) == 1:
+        body = "+12air+".join(lite_txt(lt) for lt in lites)
+        th = (f"({body})" if (ig or lites[0]["kind"] == "lg") else body) + mats[0]
+    else:
+        th = "(" + "+12air+".join(lite_txt(lt) + m for lt, m in zip(lites, mats)) + ")"
+    wh = f"{_n(max(dimA, dimB))}x{_n(min(dimA, dimB))}" if mi == 0 else f"{_n(dimB)}x{_n(dimA)}"
+    nm = f"{wh}x{th}"
+    if proj_name.strip():
+        nm = proj_name.strip() + " " + nm
+    return re.sub(r'[\\/:*?"<>|\r\n]', "_", nm) + ".html"
+
+
 st.divider()
 try:
     _rep_html = build_report()
     st.download_button("📄 下載計算報表(HTML,可用瀏覽器列印成 PDF)", data=_rep_html.encode("utf-8"),
-                       file_name="ASTM_E1300_計算報表.html", mime="text/html")
+                       file_name=report_filename(), mime="text/html")
     with st.expander("預覽報表"):
         try:
             import streamlit.components.v1 as _cv
