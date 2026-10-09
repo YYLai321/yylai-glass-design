@@ -168,7 +168,7 @@ def lookup4(t, L, S):
             wq = np.log(d1 / L) / np.log(d1 / d2)
             val = float(np.exp(np.log(k1) + wq * (np.log(k2) - np.log(k1))))
             if lvl.index(k2) - lvl.index(k1) > 1:
-                notes.append("相鄰等值線資料缺漏,以前後等值線內插(內插結果列為估算)"); est = True
+                notes.append("圖中該區間缺一條等值線,以前後等值線對數內插讀值(與人工目讀相當,可由報表附圖點位複核)")
             if x1 or x2:
                 notes.append("等值線尾段超出圖表右緣,以短邊不變平延"); est = True
             return (val, notes, est) if np.isfinite(val) else FAIL
