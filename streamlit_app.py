@@ -771,21 +771,15 @@ for i, lt in enumerate(lites):
         rd["X1 近似公式(Appendix X1)"] = "—(X1 不適用)" if w_x1_ is None else fmt_w(w_x1_)
     else:
         rd["規範變形圖"] = (fmt_w(w) + "(標準圖讀值)") if chart_w is not None else "—(超出圖框,無圖讀值)"
-    # ---- 公式解與標準圖交叉驗證(單片:圖須與公式一致;LG:圖為 50°C,應落在兩種剛度假設範圍內)----
+    # ---- LG 四邊:標準圖(50°C)合理性對照,應落在兩種剛度假設範圍內(單片四邊以公式為主,無圖可對)----
     _cw = chart_w if chart_w is not None else edge_chart_mono
     if mi == 0 and lt["kind"] == "lg":
         if _cw is None:
             rd["公式與標準圖驗證"] = "— 圖上無讀值,以公式解為準(超出圖框 / 圖下限)"
-        elif lt["kind"] == "mono":
-            _d = abs(_cw - w_est_lo); _p = _d / max(w_est_lo, 1e-9) * 100
-            _ok = _d <= 1.0 or _p <= 10.0
-            rd["公式與標準圖驗證"] = f"圖 {_cw:.1f} / 公式 {w_est_lo:.1f} mm(差 {_p:.0f}%)" + ("  ✓ 一致" if _ok else "  ⚠ 差異過大,請覆核")
-            if not _ok:
-                notes_all.append(f"{name}:標準圖讀值 {_cw:.1f} mm 與公式解 {w_est_lo:.1f} mm 差 {_p:.0f}%(> 10%),請覆核圖表數位化或公式假設")
         else:
             _lo_, _hi_ = min(w_est_lo, w_est_hi), max(w_est_lo, w_est_hi)
             _ok = (_lo_ * 0.9 - 1.0) <= _cw <= (_hi_ * 1.1 + 1.0)
-            rd["公式與標準圖驗證"] = f"圖 {_cw:.1f} mm;公式兩種剛度假設 {_lo_:.1f} ~ {_hi_:.1f} mm" + ("  ✓ 落在範圍內" if _ok else "  ⚠ 超出範圍,請覆核")
+            rd["公式與標準圖驗證"] = f"圖 {_cw:.1f} mm;公式兩種剛度假設 {_lo_:.1f} ~ {_hi_:.1f} mm" + ("  ✓ 落在範圍內(僅為合理性對照,不代表曲線已驗證)" if _ok else "  ⚠ 超出範圍,請覆核")
             if not _ok:
                 notes_all.append(f"{name}:LG 標準圖讀值 {_cw:.1f} mm 不在公式兩種剛度假設範圍 {_lo_:.1f}~{_hi_:.1f} mm 內,請覆核")
     if lg_rng:
@@ -875,7 +869,10 @@ if lim_n > 0:
         else:
             vd = "不確定:整體假設滿足、分層假設不滿足;須以規範 LG 變形圖或依 PVB 剪力模數/溫度/載重時間計算之有效厚度確認"
     else:
-        vd = ("OK" if w_max <= lim else "NG") + ("(以標準圖近似值判定)" if all(chart_used) else "(以內部計算值判定;部分片無標準圖可查時採公式/估算)" if any(chart_used) else "(以內部計算值判定)")
+        _basis = ("(以標準圖近似值判定)" if all(chart_used) else
+                  "(以公式解判定:Appendix X1 / 線性板理論)" if (mi == 0 and not any(lt["kind"] == "lg" for lt in lites)) else
+                  ("(公式估算" + ("滿足" if w_max <= lim else "不滿足") + "自訂限值;部分片超出標準圖框,非標準圖查得,線性理論於大變形時偏大)"))
+        vd = ("OK" if w_max <= lim else "NG") + _basis
     defl_txt.append(f"自訂限值 {lim_name}/{lim_n:.0f} = {lim:.1f} mm:" + vd)
     st.write("- " + defl_txt[-1])
 st.caption("ASTM E1300 本身不規定變形容許值(§5.2 Note 1)。預設 L/60 為使用者提供(據稱出自澳洲規範,條文出處尚待確認),"
@@ -1365,7 +1362,7 @@ def build_report():
                        + ("" if not any(lt["kind"] == "lg" for lt in lites) else ";LG 圖為 50°C 結果") + ")。</div>")
         else:
             out.append("<div class='note'>1~3 邊支承以標準圖查讀為主。本片超出標準圖框或圖下限,圖上無法標示讀值點,改以線性理論估算"
-                       "(線性理論於大變形時偏大,僅供參考,未作正式判定)。</div>")
+                       "(線性理論於大變形時偏大);判定欄標示「公式估算」者,表示該結果非標準圖查得。</div>")
     if si_rows:
         out.append("<h2>5. 結構矽膠受力寬度</h2>")
         out.append(pd.DataFrame(si_rows).to_html(index=False, border=0, escape=True))
